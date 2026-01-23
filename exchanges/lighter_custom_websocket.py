@@ -1,11 +1,13 @@
 """
 Custom Lighter WebSocket implementation without using the official SDK.
 Based on the sample code provided by the user.
+Updated for lighter-sdk==1.0.2
 """
 
 import asyncio
 import json
 import time
+import os  # [UPDATED] Added os import
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import websockets
 
@@ -34,6 +36,9 @@ class LighterCustomWebSocketManager:
         self.market_index = config.contract_id
         self.account_index = config.account_index
         self.lighter_client = config.lighter_client
+        
+        # [UPDATED] Load api_key_index from environment for auth token generation
+        self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX', '0'))
 
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -263,9 +268,9 @@ class LighterCustomWebSocketManager:
                     # Get auth token for the subscription
                     try:
                         if self.lighter_client:
-                            # Set auth token to expire in 10 minutes
-                            ten_minutes_deadline = int(time.time() + 10 * 60)
-                            auth_token, err = self.lighter_client.create_auth_token_with_expiry(ten_minutes_deadline)
+                            # [UPDATED] Use updated create_auth_token_with_expiry signature
+                            auth_token, err = self.lighter_client.create_auth_token_with_expiry(api_key_index=self.api_key_index)
+                            
                             if err is not None:
                                 self._log(f"Failed to create auth token for account orders subscription: {err}", "WARNING")
                             else:
@@ -275,7 +280,7 @@ class LighterCustomWebSocketManager:
                                     "auth": auth_token
                                 }
                                 await self.ws.send(json.dumps(auth_message))
-                                self._log("Subscribed to account orders with auth token (expires in 10 minutes)", "INFO")
+                                self._log("Subscribed to account orders with auth token", "INFO")
                     except Exception as e:
                         self._log(f"Error creating auth token for account orders subscription: {e}", "WARNING")
 
