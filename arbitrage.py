@@ -59,8 +59,8 @@ class ExtendedArb:
         self.lighter_bid = Decimal('0')
         self.lighter_ask = Decimal('0')
         
-        # 🔥 注意：这里 BASE_DECIMALS=8 是标准（1 BTC = 100000000 atomic units），之前成功日志也证明正确
-        self.LIGHTER_BASE_DECIMALS = 8   
+        # 精度配置: BTC=5, USDC=6
+        self.LIGHTER_BASE_DECIMALS = 5   
         self.LIGHTER_QUOTE_DECIMALS = 6  
         
         self.lighter_ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
@@ -155,10 +155,9 @@ class ExtendedArb:
         if status in ['FILLED', 'CANCELED', 'EXPIRED', 'REJECTED']:
             self.logger.info(f"📝 订单 {oid} 状态更新: {status}")
             if status == 'FILLED':
-                # 🔥 关键修复：严格确保 filled_size 是 Decimal 小数
                 raw_filled = update_data.get('filled_size', 0)
                 try:
-                    qty = Decimal(str(raw_filled)).quantize(Decimal('0.00000001'))  # 强制8位小数
+                    qty = Decimal(str(raw_filled)).quantize(Decimal('0.00001')) 
                 except:
                     qty = Decimal('0')
                 price = update_data.get('price')
@@ -171,70 +170,46 @@ class ExtendedArb:
                 self.logger.info("🔓 锁定解除，继续监控")
 
     async def place_lighter_hedge(self, side: str, qty: Decimal):
-        """
-        🔥 终极修复版：
-        - slippage 严格 0.5%（你说绝对不会超）
-        - 超强安全检查 + 详细数量日志（解决 1.3 BTC 谜团）
-        - 双重尝试（带保护 → 无保护）
-        """
         try:
-            # 🔥 超严安全检查：qty 必须小数，且 < 0.01 BTC
-            if qty <= 0 or qty >= Decimal('0.01'):
-                self.logger.error(f"🚨 致命安全警报！对冲数量异常 qty={qty} BTC，拒绝下单！（可能 Extended filled_size 返回错误或 --size 输入错）")
-                return
-
-            slippage = Decimal('0.005')  # 🔥 精确 0.5%（按你说法不会超）
+            # 安全检查
+            if qty <= 0: return
+            
+            # 🔥 5% 宽滑点设置：确保成交，防止被引擎 Cancel
+            slippage = Decimal('0.03') 
 
             if side == 'sell':
                 base_price = self.lighter_bid
-                if base_price <= 0:
-                    self.logger.error("❌ Lighter bid 无效")
-                    return
                 worst_price = base_price * (Decimal('1') - slippage)
             else:
                 base_price = self.lighter_ask
-                if base_price <= 0:
-                    self.logger.error("❌ Lighter ask 无效")
-                    return
                 worst_price = base_price * (Decimal('1') + slippage)
 
+            if base_price <= 0:
+                self.logger.warning("Lighter 价格无效，跳过对冲")
+                return
+
+            # 精度 5 (Base)
             atomic_amount = int(qty * (10 ** self.LIGHTER_BASE_DECIMALS))
             atomic_worst = int(worst_price * (10 ** self.LIGHTER_QUOTE_DECIMALS))
             
-            # 🔥 关键调试日志：明确显示计算过程
-            self.logger.info(f"🔍 对冲数量诊断: 输入 qty={qty} BTC | atomic_amount={atomic_amount} (应≈{float(qty)*1e8:.0f}) | worst_price={worst_price:.2f} | atomic_worst={atomic_worst}")
-
             client_id = int(time.time() * 1000) % 2147483647
 
-            self.logger.info(f"🛡️ 正在执行 Lighter Market 对冲: {side} {qty} BTC @ 最差 {worst_price:.2f} (slippage 0.5%)")
+            self.logger.info(f"🛡️ 正在执行 Lighter 对冲: {side} {qty} BTC (Atomic: {atomic_amount}) | 保护价: {worst_price:.2f} (5% 空间)")
 
-            # 第一尝试：带 0.5% 保护
-            try:
-                res = await self.lighter_client.create_market_order(
-                    market_index=int(self.lighter_market_id),
-                    base_amount=atomic_amount,
-                    is_ask=(side == 'sell'),
-                    avg_execution_price=atomic_worst,
-                    client_order_index=client_id
-                )
-                if isinstance(res, tuple) and len(res) >= 3 and res[2] is not None:
-                    raise Exception(f"带保护失败: {res[2]}")
-                self.logger.info(f"✅ Lighter Market 对冲成功 (带 0.5% 保护): {res}")
-                return
-            except Exception as e1:
-                self.logger.warning(f"⚠️ 带 0.5% 保护失败 ({e1})，可能是瞬时深度问题，尝试无保护...")
-
-            # 第二尝试：无保护（你说滑点不会超 0.5%，风险极低）
+            # === 🔥 修复：传回 avg_execution_price 参数 ===
             res = await self.lighter_client.create_market_order(
                 market_index=int(self.lighter_market_id),
                 base_amount=atomic_amount,
                 is_ask=(side == 'sell'),
+                avg_execution_price=atomic_worst, # ✅ 必须传这个，且值很宽
                 client_order_index=client_id
             )
+            
             if isinstance(res, tuple) and len(res) >= 3 and res[2] is not None:
-                self.logger.error(f"❌ 无保护也失败: {res[2]} (full: {res})")
+                 self.logger.error(f"❌ Lighter 对冲被拒: {res[2]}")
+                 self.logger.critical("🚨 严重警告：对冲失败，请立即手动平仓！")
             else:
-                self.logger.info(f"✅ Lighter Market 对冲成功 (无保护，滑点应<0.5%): {res}")
+                self.logger.info(f"✅ Lighter Market 对冲成功: {res}")
 
         except Exception as e:
             self.logger.error(f"❌ 对冲最终失败: {e}", exc_info=True)
